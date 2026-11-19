@@ -1,10 +1,10 @@
 # Terraform Application Load Balancer: ALB, Listener, Target Group, and Security Group
 
-This guide explains the Application Load Balancer (ALB) configuration used by `DevOps-Project-01`. The relevant infrastructure is under `DevOps-Project-01/infrastructure/` and its ALB module is in `DevOps-Project-01/infrastructure/modules/alb/`.
+This guide explains the Application Load Balancer (ALB) configuration used by `DevOps-Project-01`. The relevant infrastructure is under `DevOps-Project-01/infrastructure/`, and the ALB module is in `DevOps-Project-01/infrastructure/modules/alb/`.
 
 ## 1. Infrastructure dependency flow
 
-The ALB is created after the VPC, public subnets, route tables, and security groups are available.
+The ALB is created after the VPC, public subnets, route tables, and security groups are available:
 
 ```text
 VPC
@@ -24,18 +24,18 @@ module "vpc" {
   source = "./modules/vpc"
 
   environment     = var.environment
-  vpc_cidr       = var.vpc_cidr
+  vpc_cidr        = var.vpc_cidr
   public_subnets  = var.public_subnets
   private_subnets = var.private_subnets
-  azs            = var.availability_zones
+  azs             = var.availability_zones
 }
 
 module "security" {
   source = "./modules/security"
 
-  environment             = var.environment
-  vpc_id                 = module.vpc.vpc_id
-  allowed_ssh_cidr_blocks = var.allowed_ssh_cidr_blocks
+  environment              = var.environment
+  vpc_id                   = module.vpc.vpc_id
+  allowed_ssh_cidr_blocks  = var.allowed_ssh_cidr_blocks
 }
 
 module "alb" {
@@ -57,7 +57,7 @@ module "asg" {
 }
 ```
 
-The ALB receives public subnet IDs from the VPC module. The ASG receives the ALB target-group ARN so future application instances register with the ALB.
+The ALB receives public subnet IDs from the VPC module. The ASG receives the ALB target-group ARN so application instances register with the ALB.
 
 ## 2. ALB module files
 
@@ -89,7 +89,7 @@ variable "public_subnets" {
 
 The module does not create the public subnets or VPC; it receives them from the VPC module.
 
-## 3. Internet-facing Application Load Balancer
+## 3. Application Load Balancer resource
 
 The ALB resource is in `DevOps-Project-01/infrastructure/modules/alb/main.tf`:
 
@@ -110,25 +110,25 @@ resource "aws_lb" "main" {
 }
 ```
 
-- `name` includes the environment, such as `dev-alb`.
-- `internal = false` creates an internet-facing ALB.
-- `load_balancer_type = "application"` creates an HTTP/HTTPS Layer 7 load balancer.
-- `security_groups` attaches the ALB security group from the ALB module.
-- `subnets` places ALB nodes in the public subnets supplied by the VPC module.
-- `enable_deletion_protection = false` allows normal Terraform destruction.
-- Tags identify the environment and resource purpose.
+This resource creates an AWS Application Load Balancer:
 
-The public-subnet route requirement is:
+- `name` assigns a name such as `dev-alb`.
+- `internal = false` makes the load balancer internet-facing.
+- `load_balancer_type = "application"` creates an HTTP/HTTPS Layer 7 load balancer.
+- `security_groups` attaches `aws_security_group.alb` from the ALB module.
+- `subnets` places the ALB nodes across the public subnets supplied by the VPC module.
+- `enable_deletion_protection = false` allows Terraform to destroy the ALB.
+- The tags identify the resource and environment.
+
+The public subnet route table must contain:
 
 ```text
 0.0.0.0/0 -> Internet Gateway
 ```
 
-The public subnets must also have suitable route-table associations. Without those routes or the required security-group rules, the ALB may exist but remain unreachable or unable to forward traffic.
+Public subnets, public routes, and security-group rules are all required for the internet-facing ALB to work.
 
-## 4. ALB target group
-
-The target group represents application instances that receive traffic from the ALB:
+## 4. Target group resource
 
 ```hcl
 resource "aws_lb_target_group" "main" {
@@ -136,55 +136,49 @@ resource "aws_lb_target_group" "main" {
   port     = 8080
   protocol = "HTTP"
   vpc_id   = var.vpc_id
-
-  health_check {
-    enabled             = true
-    healthy_threshold   = 2
-    interval            = 30
-    matcher             = "200"
-    path                = "/"
-    port                = "traffic-port"
-    protocol            = "HTTP"
-    timeout             = 5
-    unhealthy_threshold = 2
-  }
-
-  tags = {
-    Name        = "${var.environment}-tg"
-    Environment = var.environment
-  }
 }
 ```
 
-- `port = 8080` forwards traffic to the Java application port.
-- `protocol = "HTTP"` sends HTTP traffic to application targets.
-- `vpc_id` places the target group in the project VPC.
-- Instances register with this target group through the ASG target-group ARN.
+A target group contains the application instances that receive traffic from the ALB:
 
-The name, port, protocol, and health-check settings should match the application being deployed.
+- `name` identifies the target group.
+- `port = 8080` sends traffic to the Java application port.
+- `protocol = "HTTP"` uses HTTP from the ALB to application targets.
+- `vpc_id` places the target group in the project VPC.
+
+The target group does not create application instances. The ASG supplies and registers targets later.
 
 ## 5. Target health check
 
-The target health check is:
-
-```text
-Protocol:  HTTP
-Path:      /
-Expected:  200
-Interval:  30 seconds
-Timeout:   5 seconds
-Healthy:   2 successful checks
-Unhealthy: 2 failed checks
-Port:      traffic-port
+```hcl
+health_check {
+  enabled             = true
+  healthy_threshold   = 2
+  interval            = 30
+  matcher             = "200"
+  path                = "/"
+  port                = "traffic-port"
+  protocol            = "HTTP"
+  timeout             = 5
+  unhealthy_threshold = 2
+}
 ```
 
-`traffic-port` means the health check uses target port `8080` from the target group.
+The health-check settings mean:
 
-The application must respond with HTTP `200` at `/`. Otherwise, targets remain unhealthy and the ALB does not route application traffic to them.
+- `enabled = true` enables health checking.
+- `path = "/"` checks the application root path.
+- `matcher = "200"` considers HTTP status `200` healthy.
+- `interval = 30` performs a check every 30 seconds.
+- `timeout = 5` waits five seconds for a response.
+- `healthy_threshold = 2` requires two successful checks before a target is healthy.
+- `unhealthy_threshold = 2` requires two failures before a target is unhealthy.
+- `port = "traffic-port"` uses target port `8080`.
+- `protocol = "HTTP"` performs an HTTP check.
 
-## 6. HTTP listener
+The application must return HTTP `200` at `/` on port `8080`; otherwise, targets remain unhealthy and the ALB does not route traffic to them.
 
-The listener accepts traffic at the ALB and forwards it to the target group:
+## 6. HTTP listener resource
 
 ```hcl
 resource "aws_lb_listener" "main" {
@@ -199,14 +193,15 @@ resource "aws_lb_listener" "main" {
 }
 ```
 
-The listener:
+The listener receives client requests:
 
-- Accepts public HTTP traffic on port `80`.
-- Uses the ALB ARN as the listener parent.
-- Forwards matching traffic to the target group.
-- Sends traffic to application targets on target port `8080`.
+- `load_balancer_arn` associates it with `aws_lb.main`.
+- `port = "80"` listens for HTTP traffic.
+- `protocol = "HTTP"` handles unencrypted HTTP requests.
+- `default_action.type = "forward"` sends traffic onward.
+- `target_group_arn` identifies the application target group.
 
-There is currently no HTTPS listener or ACM certificate resource in this module. Port `443` is allowed by the ALB security group, but no HTTPS listener is configured unless one is added later.
+There is currently no HTTPS listener or ACM certificate resource. Port `443` is allowed in the ALB security group, but no HTTPS listener is configured yet.
 
 The current request flow is:
 
@@ -214,13 +209,11 @@ The current request flow is:
 Browser
   -> HTTP port 80
   -> ALB listener
-  -> target group
-  -> application instance port 8080
+  -> Target group
+  -> Application instance port 8080
 ```
 
-## 7. ALB security group
-
-The ALB module creates a module-local security group:
+## 7. ALB security group resource
 
 ```hcl
 resource "aws_security_group" "alb" {
@@ -256,17 +249,40 @@ resource "aws_security_group" "alb" {
 }
 ```
 
-Allowed traffic is:
+### Inbound HTTP
 
-| Direction | Protocol/port | Source or destination |
-| --- | --- | --- |
-| Inbound | TCP 80 | `0.0.0.0/0` |
-| Inbound | TCP 443 | `0.0.0.0/0` |
-| Outbound | All protocols | `0.0.0.0/0` |
+```hcl
+from_port   = 80
+to_port     = 80
+protocol    = "tcp"
+cidr_blocks = ["0.0.0.0/0"]
+```
 
-Port `80` has an active listener. Port `443` is allowed but has no listener or certificate in this module.
+This allows public IPv4 traffic to reach HTTP port `80`.
 
-## 8. ALB to application security relationship
+### Inbound HTTPS
+
+```hcl
+from_port   = 443
+to_port     = 443
+protocol    = "tcp"
+cidr_blocks = ["0.0.0.0/0"]
+```
+
+This permits traffic to port `443`, but the file does not create an HTTPS listener or attach an SSL certificate.
+
+### Outbound traffic
+
+```hcl
+from_port   = 0
+to_port     = 0
+protocol    = "-1"
+cidr_blocks = ["0.0.0.0/0"]
+```
+
+`protocol = "-1"` permits all protocols outbound, allowing the ALB to reach application targets.
+
+## 8. ALB-to-application security relationship
 
 The application security group in `DevOps-Project-01/infrastructure/modules/security/main.tf` allows TCP `8080` from `aws_security_group.alb.id`:
 
@@ -279,7 +295,7 @@ ingress {
 }
 ```
 
-The security chain is therefore conceptually:
+The security chain is:
 
 ```text
 Internet
@@ -289,6 +305,8 @@ Internet
   -> Application security group
   -> Application target
 ```
+
+Security groups are stateful, so response traffic for an allowed connection is permitted automatically.
 
 ## 9. Duplicate ALB security-group definitions
 
@@ -368,11 +386,11 @@ output "target_group_arn" {
 }
 ```
 
-Although declared in `outputs.tf`, these outputs provide:
+The outputs provide:
 
-- `alb_arn`: identity of the load balancer.
-- `alb_dns_name`: public DNS endpoint for accessing the ALB.
-- `target_group_arn`: ARN passed to the ASG for target registration.
+- `alb_arn`: the ALB ARN.
+- `alb_dns_name`: the public ALB DNS endpoint.
+- `target_group_arn`: the ARN passed to the ASG for target registration.
 
 ## 12. Validation and deployment
 
@@ -414,4 +432,4 @@ Internet
   -> EC2 application instance in private subnet
 ```
 
-Route tables determine network reachability, while security groups determine whether each connection is allowed.
+Route tables determine network reachability. Security groups determine whether traffic is permitted.
