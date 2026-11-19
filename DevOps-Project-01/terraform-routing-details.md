@@ -1,6 +1,186 @@
 # Terraform Routing: Routes, Route Tables, and Associations
 
-This document explains the routing components used in the `DevOps-Project-01` AWS VPC. It covers routes, route tables, route-table associations, public routing, private routing, and the Terraform resource relationships.
+This document explains the routing components used in the `DevOps-Project-01` AWS VPC. It covers VPC/subnet planning, routes, route tables, route-table associations, public routing, private routing, and Terraform resource relationships.
+
+## What is a VPC?
+
+A **Virtual Private Cloud (VPC)** is a logically isolated virtual network inside AWS. It owns the overall IP address range used by resources placed inside it.
+
+For this project:
+
+```text
+VPC CIDR: 10.20.0.0/16
+Region: ap-south-1
+```
+
+The VPC provides an address space, DNS support, subnets, routing, Internet Gateway attachment, and network isolation.
+
+A VPC CIDR should not overlap with networks that may connect to it through VPC peering or VPN. Use `/16` as a planning range and divide it into smaller subnet CIDRs.
+
+Terraform creates the VPC with:
+
+```hcl
+resource "aws_vpc" "main" {
+  cidr_block           = var.vpc_cidr
+  enable_dns_support   = true
+  enable_dns_hostnames = true
+
+  tags = {
+    Name = "${var.project}-${var.environment}-vpc"
+  }
+}
+```
+
+- `cidr_block` defines the VPC address range.
+- `enable_dns_support` enables AWS-provided DNS resolution in the VPC.
+- `enable_dns_hostnames` enables DNS hostnames for supported AWS resources.
+
+## Why use public and private subnets?
+
+We divide the VPC into smaller subnet ranges placed across two Availability Zones. This separates internet-facing resources from internal application and database resources.
+
+```text
+VPC: 10.20.0.0/16
+├── Public subnet 1: 10.20.1.0/24  (Availability Zone 1)
+├── Public subnet 2: 10.20.2.0/24  (Availability Zone 2)
+├── Private subnet 1: 10.20.11.0/24 (Availability Zone 1)
+└── Private subnet 2: 10.20.12.0/24 (Availability Zone 2)
+```
+
+Each subnet range must fit inside the VPC CIDR and must not overlap another subnet.
+
+## What is an Availability Zone?
+
+An Availability Zone is a separate location within an AWS Region. Public and private subnets should be placed in at least two Availability Zones when the infrastructure is intended to tolerate a zonal failure.
+
+Instead of hardcoding AZ names, Terraform discovers two available zones:
+
+```hcl
+data "aws_availability_zones" "available" {
+  state = "available"
+
+  filter {
+    name   = "opt-in-status"
+    values = ["opt-in-not-required"]
+  }
+}
+
+locals {
+  availability_zones = slice(
+    data.aws_availability_zones.available.names,
+    0,
+    2
+  )
+}
+```
+
+This avoids assuming names such as `ap-south-1a` or `ap-south-1b`. AWS account availability can vary.
+
+## Public subnets
+
+A public subnet is a subnet whose associated route table has a route to an Internet Gateway.
+
+Terraform creates the two public subnets with:
+
+```hcl
+resource "aws_subnet" "public" {
+  count = length(var.public_subnet_cidrs)
+
+  vpc_id                  = aws_vpc.main.id
+  cidr_block              = var.public_subnet_cidrs[count.index]
+  availability_zone       = local.availability_zones[count.index]
+  map_public_ip_on_launch = true
+
+  tags = {
+    Name = "${var.project}-${var.environment}-public-${count.index + 1}"
+    Tier = "public"
+  }
+}
+```
+
+The resource has one subnet for each CIDR in `public_subnet_cidrs`:
+
+```hcl
+public_subnet_cidrs = [
+  "10.20.1.0/24",
+  "10.20.2.0/24"
+]
+```
+
+- `vpc_id` places the subnet inside `aws_vpc.main`.
+- `cidr_block` assigns the subnet address range.
+- `availability_zone` selects a zone for that subnet.
+- `map_public_ip_on_launch = true` gives EC2 instances launched in the subnet a public IPv4 address by default.
+
+Public subnets are intended for internet-facing entry points, for example:
+
+- Application Load Balancer
+- NAT Gateway
+- Bastion host, if explicitly required
+
+Assigning a public IP alone does not make routing public. The subnet needs:
+
+1. A route to an Internet Gateway.
+2. An associated route table.
+3. Appropriate security-group rules.
+4. A resource that needs public connectivity.
+
+## Private subnets
+
+A private subnet does not assign public IPs to resources and has no direct internet route in the initial design.
+
+Terraform creates the private subnets with:
+
+```hcl
+resource "aws_subnet" "private" {
+  count = length(var.private_subnet_cidrs)
+
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = var.private_subnet_cidrs[count.index]
+  availability_zone = local.availability_zones[count.index]
+
+  tags = {
+    Name = "${var.project}-${var.environment}-private-${count.index + 1}"
+    Tier = "private"
+  }
+}
+```
+
+Example private CIDRs:
+
+```hcl
+private_subnet_cidrs = [
+  "10.20.11.0/24",
+  "10.20.12.0/24"
+]
+```
+
+Private subnets are intended for:
+
+- EC2 application instances
+- RDS database instances
+- Internal services
+- Container or Kubernetes nodes
+
+Do not assign RDS or application instances a public IP merely to make them reachable. Restrict them with private placement and security-group rules instead.
+
+Private subnets can communicate with other resources inside the VPC through the VPC local route. They cannot currently reach the general internet because their route tables have no `0.0.0.0/0` route.
+
+## Internet Gateway
+
+An Internet Gateway connects a VPC to the internet:
+
+```hcl
+resource "aws_internet_gateway" "main" {
+  vpc_id = aws_vpc.main.id
+
+  tags = {
+    Name = "${var.project}-${var.environment}-igw"
+  }
+}
+```
+
+The Internet Gateway is attached to the VPC, but routing determines whether a subnet can use it.
 
 ## Network routing overview
 
@@ -14,8 +194,10 @@ Routing and security serve different purposes:
 
 | Component | Purpose |
 | --- | --- |
+| VPC | Logical network boundary. |
+| Subnet | Smaller IP range within the VPC and within an Availability Zone. |
 | Route / route table | Selects the next destination for an IP address range. |
-| Internet Gateway | Provides a VPC-to-internet routing component. |
+| Internet Gateway | Provides VPC-to-internet routing. |
 | Security group | Allows or denies traffic for an AWS resource. |
 | Network ACL | Adds optional subnet-level packet filtering. |
 
