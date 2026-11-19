@@ -1,31 +1,19 @@
-# Terraform Auto Scaling Group — Exact Configuration and Line-by-Line Explanation
+# Complete Explanation of the ASG Terraform File
 
-This document is based on the exact committed configuration in:
+This document explains the complete behavior of the Auto Scaling Group (ASG) configuration in `infrastructure-v2/asg.tf`, including how it uses the AMI lookup, launch template, private subnets, ALB target group, health checks, tags, and CPU scaling policy.
 
-```text
-DevOps-Project-01/infrastructure-v2/asg.tf
-```
+## File being explained
 
-Repository commit: `01d8c03aa1c02fd5b658f720a2156a2bc2c9490d`
+[`DevOps-Project-01/infrastructure-v2/asg.tf`](https://github.com/pradyumnakv8-ops/DevOps-Projects/blob/01d8c03aa1c02fd5b658f720a2156a2bc2c9490d/DevOps-Project-01/infrastructure-v2/asg.tf)
 
-## 1. Architecture context
+The ASG file does not work in isolation. It refers to variables in `variables.tf`, the application security group in `security-groups.tf`, the target group in `alb.tf`, and private subnet resources in `vpc.tf`.
 
-The infrastructure creates a public Application Load Balancer in the public subnets and an application Auto Scaling Group in the private subnets:
+## 1. Complete `asg.tf` configuration
 
-```text
-Internet
-  -> Application Load Balancer
-  -> Application target group
-  -> Private application EC2 instances
-  -> Application security group
-```
-
-The application ASG uses two private subnets across two Availability Zones. It is attached to the application target group, and EC2 instances are created from the application launch template.
-
-The complete ASG configuration is:
+The following is the committed ASG configuration, shown for reference:
 
 ```hcl
- data "aws_ssm_parameter" "amazon_linux_2023" {
+data "aws_ssm_parameter" "amazon_linux_2023" {
   name = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64"
 }
 
@@ -42,6 +30,8 @@ resource "aws_launch_template" "application" {
     http_tokens   = "required"
   }
 
+  # The selected AMI must already contain the Java application and its runtime,
+  # because this VPC configuration currently has no NAT route for private subnets.
   tag_specifications {
     resource_type = "instance"
 
@@ -63,7 +53,7 @@ resource "aws_autoscaling_group" "application" {
   max_size            = var.asg_max_size
   desired_capacity    = var.asg_desired_capacity
   vpc_zone_identifier = aws_subnet.private[*].id
-  target_group_arns   = [aws_lb_target_group.application.arn]
+  target_group_arns    = [aws_lb_target_group.application.arn]
 
   health_check_type         = "ELB"
   health_check_grace_period = var.asg_health_check_grace_period
@@ -91,6 +81,7 @@ resource "aws_autoscaling_group" "application" {
     propagate_at_launch = true
   }
 
+  # A target-tracking policy changes desired capacity at runtime.
   lifecycle {
     ignore_changes = [desired_capacity]
   }
@@ -114,7 +105,28 @@ resource "aws_autoscaling_policy" "application_cpu_target_tracking" {
 }
 ```
 
-## 2. AMI data source: lines 1–3
+## 2. What the file creates and reads
+
+There are three Terraform blocks in this file:
+
+1. `data "aws_ssm_parameter"` reads the current Amazon Linux 2023 AMI ID from AWS Systems Manager Parameter Store. It does not create an AWS resource.
+2. `aws_launch_template` creates a reusable EC2 launch specification.
+3. `aws_autoscaling_group` creates and maintains the application EC2 fleet.
+4. `aws_autoscaling_policy` attaches automatic CPU target-tracking scaling to that fleet.
+
+The end-to-end intention is:
+
+```text
+Terraform reads an AMI ID
+  -> creates the EC2 launch template
+  -> creates the application ASG in private subnets
+  -> ASG launches instances from the template
+  -> instances register with the ALB target group
+  -> ALB health checks the application
+  -> CPU target tracking adjusts group capacity
+```
+
+## 3. AMI lookup: lines 1–3
 
 ```hcl
 data "aws_ssm_parameter" "amazon_linux_2023" {
@@ -122,85 +134,74 @@ data "aws_ssm_parameter" "amazon_linux_2023" {
 }
 ```
 
-A Terraform `data` block reads existing AWS information. It does not create or modify an AWS resource.
+- `data` tells Terraform to query information that already exists in AWS rather than create a resource.
+- `aws_ssm_parameter` is the AWS provider data source for a Systems Manager Parameter Store parameter.
+- `amazon_linux_2023` is Terraform's local name for this lookup.
+- `name` identifies AWS's public parameter for the latest standard x86-64 Amazon Linux 2023 AMI.
+- The parameter value is accessed later as `data.aws_ssm_parameter.amazon_linux_2023.value`.
+- The public parameter resolves to an AMI for the AWS region selected by the provider.
 
-The SSM parameter name is the AWS public parameter for the latest Amazon Linux 2023 x86-64 AMI in the configured region.
+This lookup requires the Terraform runner to have AWS credentials and permission to read the parameter. The EC2 instances do not use this data source at runtime.
 
-The resolved AMI value is obtained through:
-
-```hcl
-data.aws_ssm_parameter.amazon_linux_2023.value
-```
-
-This lookup is used only when `var.application_ami_id` is an empty string.
-
-The fallback AMI is a base operating-system AMI. This configuration does not install Java or Tomcat and does not deploy the application into newly launched instances.
-
-## 3. Launch template resource: lines 5–33
+## 4. Launch template: lines 5–33
 
 ```hcl
 resource "aws_launch_template" "application" {
 ```
 
-This creates an EC2 Launch Template named by the supplied prefix. A launch template is a reusable specification for new EC2 instances.
+A launch template is the recipe AWS uses when it creates each EC2 instance in the ASG. Changing the template affects future launches; by itself, it does not guarantee that already-running instances are replaced.
 
-### Name prefix: line 6
+### 4.1 Template name prefix
 
 ```hcl
 name_prefix = "${var.project}-${var.environment}-app-"
 ```
 
-Terraform creates a launch-template name beginning with the project and environment:
+Terraform builds the prefix from the project and environment variables. With the defaults, the prefix begins `java-login-app-dev-app-`. AWS/Terraform appends characters to make the name unique.
 
-```text
-java-login-app-dev-app-
-```
-
-AWS adds a unique suffix or generated portion to make the complete launch-template name unique.
-
-### AMI selection: line 7
+### 4.2 AMI choice
 
 ```hcl
 image_id = var.application_ami_id != "" ? var.application_ami_id : data.aws_ssm_parameter.amazon_linux_2023.value
 ```
 
-This conditional expression works as follows:
+This is a conditional expression:
 
-- If `application_ami_id` is not empty, use that custom AMI.
-- If `application_ami_id` is empty, use the latest Amazon Linux 2023 AMI from SSM.
+- If `application_ami_id` is set to a non-empty string, use that custom AMI.
+- If it is empty, use the AMI ID returned by the SSM parameter lookup.
 
-A custom AMI is the preferred option for an application-ready image. The AMI must contain the application, Java runtime, and any required startup configuration.
+The default SSM image is a base operating-system image. It is not automatically an application image. The launch template contains no `user_data` block, so it does not install Java, Tomcat, or the Java application. A production-ready deployment must supply an application-ready AMI or add a separate deployment mechanism.
 
-### Instance type: line 8
+### 4.3 Instance size
 
 ```hcl
 instance_type = var.instance_type
 ```
 
-The selected EC2 instance type is supplied by `var.instance_type`. It defaults to `t3.micro`.
+This selects the EC2 instance type. The current variable default is `t3.micro`. The choice affects CPU, memory, network capabilities, and cost. Verify that the application fits the selected instance size and that the AMI architecture is compatible.
 
-### EC2 key pair: line 9
+### 4.4 Optional EC2 key pair
 
 ```hcl
 key_name = var.key_name != "" ? var.key_name : null
 ```
 
-- If `key_name` is not empty, EC2 attaches that key pair to the instance.
-- If `key_name` is empty, the launch template sends `null`, so no key pair is configured.
+- A non-empty `key_name` attaches the named EC2 key pair.
+- An empty string becomes `null`, so the template does not specify a key pair.
 
-The key pair alone does not permit SSH access. SSH/network/security configuration must also permit it.
+A key pair is only one part of remote access; network routing and security-group rules must also allow the intended access. The current application security group does not open SSH.
 
-### Security groups: line 11
+### 4.5 Instance security group
 
 ```hcl
 vpc_security_group_ids = [aws_security_group.application.id]
 ```
 
-Each launched instance receives the application security group. The referenced security group is declared in `security-groups.tf`.
+The launch template attaches the application security group to every launched instance. The square brackets make the security-group ID a list, as required by the launch-template argument.
 
-It allows application traffic on `var.application_port`, default `8080`, when the source is the ALB security group.
+In `security-groups.tf`, this group allows TCP traffic on `var.application_port` (default `8080`) from the ALB security group. Thus, the application port is not opened directly to every internet address by this rule.
 
-### IMDS settings: lines 13–16
+### 4.6 EC2 metadata options
 
 ```hcl
 metadata_options {
@@ -209,12 +210,26 @@ metadata_options {
 }
 ```
 
-- `http_endpoint = "enabled"` enables access to instance metadata.
-- `http_tokens = "required"` requires IMDSv2 session tokens.
+- `http_endpoint = "enabled"` enables the EC2 Instance Metadata Service endpoint.
+- `http_tokens = "required"` requires IMDSv2 tokens for metadata requests.
 
-This prevents unauthorized use of the basic metadata endpoint without a token. An application or agent that uses instance metadata must support IMDSv2.
+This is a security setting that helps prevent unauthorized access to instance metadata. Any application or agent that needs metadata must support IMDSv2.
 
-### Instance tags: lines 20–28
+### 4.7 The inline comment about the AMI and NAT
+
+```hcl
+# The selected AMI must already contain the Java application and its runtime,
+# because this VPC configuration currently has no NAT route for private subnets.
+```
+
+This comment records two operational requirements:
+
+- There is no `user_data` in this template to install or deploy application software.
+- The current `vpc.tf` has private route tables but no NAT gateway route, so the instances do not have configured public internet egress for downloading packages at startup.
+
+A prebuilt AMI or a reachable private artifact/deployment service is needed unless private-subnet egress is added.
+
+### 4.8 Launch-template instance tags
 
 ```hcl
 tag_specifications {
@@ -228,15 +243,15 @@ tag_specifications {
 }
 ```
 
-The launch template assigns these tags to EC2 instances created from it:
+This applies tags to EC2 instances created from the launch template:
 
-- `Name`: identifies the application instance.
-- `Environment`: distinguishes environments such as dev or prod.
-- `Tier`: identifies the instance as belonging to the application tier.
+- `Name` provides a descriptive EC2 instance name.
+- `Environment` identifies the environment such as `dev`.
+- `Tier` identifies the application tier.
 
-Tagging launch-template instances and tagging ASG-launched instances are separate mechanisms. This block applies launch-template instance tags. The ASG also contains separate propagated tags.
+The ASG below also defines tags with `propagate_at_launch = true`. Those ASG tags are independently propagated to ASG-launched instances. The tag key/value pairs here intentionally match the ASG tags.
 
-### Lifecycle behavior: lines 30–32
+### 4.9 Launch-template replacement lifecycle
 
 ```hcl
 lifecycle {
@@ -244,33 +259,27 @@ lifecycle {
 }
 ```
 
-When Terraform replaces the launch template, it creates the replacement first. It then destroys the old launch template.
+When Terraform must replace the launch template, it requests creation of the replacement before destruction of the old one. This reduces the chance of a gap where no template exists.
 
-This setting does not immediately replace every existing EC2 instance. Existing instances continue running until a replacement process, instance refresh, ASG update, or manual termination occurs.
+It does not perform an instance refresh and does not itself replace running EC2 instances. If existing instances must adopt a new template version, an instance refresh or another controlled replacement operation is needed.
 
-## 4. ASG resource: lines 35–73
+## 5. Auto Scaling Group: lines 35–73
 
 ```hcl
 resource "aws_autoscaling_group" "application" {
 ```
 
-This resource creates the application Auto Scaling Group.
+The ASG maintains a fleet of EC2 instances based on the launch template, health status, capacity bounds, and scaling policies.
 
-### ASG name: line 36
+### 5.1 Group name
 
 ```hcl
 name = "${var.project}-${var.environment}-application-asg"
 ```
 
-For example, with the default project and environment, the ASG name is:
+This creates a name such as `java-login-app-dev-application-asg`. The name is used in the AWS console, APIs, monitoring dimensions, and by the scaling policy.
 
-```text
-java-login-app-dev-application-asg
-```
-
-The ASG name is used for CloudWatch dimensions and operational identification.
-
-### Capacity values: lines 37–39
+### 5.2 Minimum, maximum, and initial desired capacity
 
 ```hcl
 min_size         = var.asg_min_size
@@ -278,96 +287,61 @@ max_size         = var.asg_max_size
 desired_capacity = var.asg_desired_capacity
 ```
 
-The defaults are:
+The current defaults are:
 
 ```text
-min_size         = 2
-max_size         = 6
-desired_capacity = 2
+Minimum: 2 instances
+Maximum: 6 instances
+Initial desired capacity: 2 instances
 ```
 
-The ASG operates with these rules:
+- `min_size` is the lower bound. The ASG should not scale in below this count.
+- `max_size` is the upper bound. Scaling out should not exceed this count.
+- `desired_capacity` is the requested starting capacity when the group is created or when Terraform manages that value.
 
-- It should maintain at least two instances.
-- It should not exceed six instances.
-- It initially starts with two instances.
-- CPU target tracking can change the current desired capacity within the minimum and maximum.
+The values must be consistent: `min_size <= desired_capacity <= max_size`. The target-tracking policy changes the running desired capacity within those bounds.
 
-The capacity relationship must satisfy:
-
-```text
-min_size <= desired_capacity <= max_size
-```
-
-The ASG can replace failed instances even when the current desired capacity is not enough to satisfy the minimum and maximum due to a launch failure or termination event.
-
-### Private subnet placement: line 40
+### 5.3 Private subnets and Availability Zones
 
 ```hcl
 vpc_zone_identifier = aws_subnet.private[*].id
 ```
 
-The `[*]` splat expression converts the private-subnet resource list into a list of subnet IDs.
+`aws_subnet.private` is the list of private subnets created in `vpc.tf`; `[*].id` selects each subnet ID. The current VPC configuration defines two private subnets in two Availability Zones, so AWS can place the instances across both zones.
 
-The ASG launches instances in both private subnets. The VPC configuration uses two private CIDRs in separate Availability Zones:
+These are private subnets; the application instances are not given public IPs by this ASG configuration. The VPC configuration currently does not provide NAT egress for these subnets.
 
-```text
-10.20.11.0/24
-10.20.12.0/24
-```
-
-This provides Multi-AZ instance placement. Instances do not receive public addresses through the private subnet configuration.
-
-### ALB target group: line 41
+### 5.4 Registration with the ALB target group
 
 ```hcl
 target_group_arns = [aws_lb_target_group.application.arn]
 ```
 
-This tells the ASG to register every instance it creates with the application target group.
+The ASG associates launched instances with the application target group defined in `alb.tf`. AWS registers new instances and deregisters instances that leave the group.
 
-The target group is defined in `alb.tf` as an instance target group for HTTP port `8080`.
+The target group currently uses HTTP, the configured application port (default `8080`), and the configured health-check path (default `/`). The ALB forwards requests to targets that pass its health checks.
 
-The ASG registration flow is:
-
-```text
-Launch instance
-  -> Register instance with target group
-  -> ALB performs health check
-  -> Healthy instance receives traffic
-```
-
-### Health-check type: line 43
+### 5.5 ELB health checks
 
 ```hcl
 health_check_type = "ELB"
 ```
 
-This makes the ASG consider target health from the load balancer, not only EC2 status checks.
+This configures the ASG to use Elastic Load Balancing health status in addition to EC2 health status. If the application target is unhealthy, the ASG can mark the instance unhealthy and replace it according to Auto Scaling behavior.
 
-If an instance is running but the application fails the target health check, it is unhealthy from the ASG’s load-balancer health perspective. The ASG can replace it according to ASG replacement behavior.
+The ALB target-group health check currently checks HTTP `/` on the target's traffic port and accepts status codes `200–399`. Installing or booting Linux alone does not make an application target healthy; the application must be running and return an accepted response.
 
-### Health-check grace period: line 44
+### 5.6 Launch health-check grace period
 
 ```hcl
 health_check_grace_period = var.asg_health_check_grace_period
 ```
 
-The default grace period is 300 seconds.
+The default is 300 seconds. This gives a new instance time to initialize before ELB health failures can cause ASG replacement decisions.
 
-During this period, newly launched instances are given time to initialize. ELB health-check failures are not used to terminate a just-launched instance until the grace period has elapsed.
+Set the grace period long enough for the actual boot and application startup time. It does not make an unhealthy application healthy; it only delays when the ASG starts acting on the initial health results.
 
-The grace period should cover:
-
-- EC2 boot time.
-- Java and Tomcat startup.
-- Application deployment.
-- Application database initialization.
-- First successful application health response.
-
-If startup takes longer than the grace period, the ASG can assess the instance too early and replace it.
-
-## 5. Launch-template selection: lines 46–49
+### 5.7 Select the launch template and version
 
 ```hcl
 launch_template {
@@ -376,18 +350,14 @@ launch_template {
 }
 ```
 
-The ASG uses:
+- `id` connects the ASG to the launch template above.
+- `latest_version` tells AWS to use the newest version of that template for instances it launches.
 
-- `aws_launch_template.application.id` as the launch-template ID.
-- `.latest_version` as the launch-template version.
+Existing instances do not automatically change their AMI or settings when a new template version is created. Use a controlled instance refresh or replacement process when existing instances need the new configuration.
 
-A launch-template change creates a newer version. The ASG may use the latest version for future launches.
+### 5.8 ASG tags and propagation
 
-Existing running instances are not automatically reconfigured. An instance refresh or replacement is needed to guarantee that existing instances use the new launch-template version.
-
-## 6. ASG propagated tags: lines 51–67
-
-### Name tag
+Each block has a `key`, `value`, and `propagate_at_launch = true`:
 
 ```hcl
 tag {
@@ -397,9 +367,7 @@ tag {
 }
 ```
 
-The ASG applies `Name` to instances when they launch.
-
-### Environment tag
+This propagates the `Name` tag to instances at launch.
 
 ```hcl
 tag {
@@ -409,9 +377,7 @@ tag {
 }
 ```
 
-This identifies the deployment environment.
-
-### Tier tag
+This propagates the environment label.
 
 ```hcl
 tag {
@@ -421,11 +387,11 @@ tag {
 }
 ```
 
-This identifies the instance as part of the application tier.
+This propagates the application tier label.
 
-`propagate_at_launch = true` means these tags are copied onto instances when the ASG creates them.
+These tags aid filtering, billing, inventory, and operations. The ASG resource tags themselves and the EC2 instance tags are separate objects; `propagate_at_launch` copies the specified tags onto newly launched instances.
 
-## 7. Desired-capacity lifecycle behavior: lines 69–72
+### 5.9 Ignore runtime desired-capacity changes
 
 ```hcl
 lifecycle {
@@ -433,95 +399,71 @@ lifecycle {
 }
 ```
 
-Terraform normally detects and corrects configuration drift for `desired_capacity`.
+Without this lifecycle rule, Terraform can see that the ASG's live desired capacity differs from the configuration value and attempt to restore the configured value on a later plan/apply.
 
-Here, Terraform ignores subsequent changes to it after creation. This allows the CPU target-tracking policy to update the ASG’s runtime desired capacity without Terraform resetting it to the original Terraform value during a later apply.
+Target tracking changes desired capacity at runtime. Ignoring changes to this field lets the scaling policy manage its live value instead of Terraform resetting it on every apply. The configured minimum and maximum remain in effect.
 
-Changing `var.asg_desired_capacity` may still update initial state or resource behavior in some lifecycle cases, but scaling operations remain responsible for runtime capacity until another explicit ASG configuration change is applied.
+Because Terraform ignores this attribute, changing the `asg_desired_capacity` input may not have the expected effect on an existing ASG. Make intentional capacity changes through a planned operational change and review the plan carefully.
 
-This should not be used to increase or lower `desired_capacity` beyond `min_size` or `max_size`.
-
-## 8. CPU target-tracking policy: lines 75–90
+## 6. CPU target-tracking scaling policy: lines 75–90
 
 ```hcl
 resource "aws_autoscaling_policy" "application_cpu_target_tracking" {
 ```
 
-This creates a CPU-based target-tracking scaling policy.
+This policy dynamically adjusts the application ASG to keep a predefined CPU metric near a target.
 
-### Policy name: line 76
-
-```hcl
-name = "${var.project}-${var.environment}-app-cpu-target"
-```
-
-The policy name uses the project and environment.
-
-### ASG association: line 77
+### 6.1 Policy name and ASG association
 
 ```hcl
+name                   = "${var.project}-${var.environment}-app-cpu-target"
 autoscaling_group_name = aws_autoscaling_group.application.name
 ```
 
-The policy is attached to the application ASG.
+The first line creates an environment-specific policy name, for example `java-login-app-dev-app-cpu-target`. The second attaches the policy to the application ASG.
 
-### Policy type: line 78
+### 6.2 Policy type
 
 ```hcl
 policy_type = "TargetTrackingScaling"
 ```
 
-Target tracking automatically creates and manages the CloudWatch alarms needed to adjust ASG capacity toward a metric target.
+Target tracking is a managed scaling policy. AWS creates and manages the CloudWatch alarms needed to adjust capacity toward its target. This is separate from an ordinary CloudWatch alarm that has user-supplied `alarm_actions`.
 
-It is different from the CloudWatch alarm resource: target tracking directly controls desired ASG capacity and is not a separate alarm with `alarm_actions`.
-
-### Instance warm-up: line 80
+### 6.3 Instance warm-up
 
 ```hcl
 estimated_instance_warmup = var.asg_instance_warmup_seconds
 ```
 
-The default is 300 seconds.
+The current default is 300 seconds. This tells target tracking how long a newly launched instance is expected to take before it contributes fully to scaling decisions.
 
-During warm-up, the policy estimates that a new instance is not fully ready. Its capacity and metric behavior should not immediately be used as if the instance were fully productive.
+Warm-up and `health_check_grace_period` are different settings:
 
-Warm-up should cover application startup. It is separate from `health_check_grace_period`, but both concern launch readiness.
+- The ASG health-check grace period delays acting on initial load-balancer health results.
+- The scaling-policy warm-up informs scaling calculations about newly added capacity.
 
-### Target-tracking block: line 82
+Both should be set with actual boot and application initialization time in mind.
 
-```hcl
-target_tracking_configuration {
-```
-
-This block defines the metric, target, and scale-in behavior.
-
-### Target CPU utilization: line 83
+### 6.4 Target value
 
 ```hcl
 target_value = var.asg_cpu_target_value
 ```
 
-The default is `60`. This means AWS attempts to keep the ASG’s average CPU utilization near 60%.
+The default target is 60 percent average CPU utilization across the ASG. It is a goal, not a hard maximum or an instantaneous trigger. AWS adjusts capacity over time to try to keep the metric near the target.
 
-This is a percentage target, not a hard alarm threshold:
+If average CPU demand is high, AWS can add instances, subject to `max_size`. When CPU demand is low, the policy may remove instances, subject to `min_size` and AWS's scale-in behavior.
 
-- Above the target for enough time, AWS can increase desired capacity.
-- Below the target and able to scale in safely, AWS can reduce desired capacity.
-- Scaling remains constrained by `min_size` and `max_size`.
-
-Validation allows only values greater than `0` and less than `100`.
-
-### Scale-in setting: line 84
+### 6.5 Permit scale-in
 
 ```hcl
 disable_scale_in = false
 ```
 
-Scale-in is enabled. AWS may terminate instances to reduce capacity when CPU utilization is sufficiently below the target.
+This allows target tracking to scale in as well as scale out. Setting it to `true` would disable scale-in for this policy. With scale-in enabled, the ASG still cannot go below its configured minimum.
 
-Scale-in is also constrained by the ASG’s minimum size and AWS target-tracking safety behavior.
-
-### Predefined CPU metric: lines 86–88
+### 6.6 CPU metric
 
 ```hcl
 predefined_metric_specification {
@@ -529,158 +471,105 @@ predefined_metric_specification {
 }
 ```
 
-This selects the predefined average CPU metric across the ASG:
+This chooses the AWS predefined metric for average CPU utilization across instances in this ASG. Target tracking uses that metric and its target value to calculate capacity adjustments.
+
+CPU is only one possible measure of application demand. If the application is constrained by request count, latency, memory, or queue depth, CPU target tracking may not alone represent its capacity needs.
+
+## 7. Values supplied by `variables.tf`
+
+The ASG file references these input variables:
+
+| Variable | Current default or source | Purpose |
+| --- | --- | --- |
+| `project` | `java-login-app` | Prefix for resource names and tags |
+| `environment` | `dev` | Environment suffix and tag |
+| `application_ami_id` | Empty string | Optional custom application AMI; empty selects the SSM AMI |
+| `instance_type` | `t3.micro` | EC2 instance type |
+| `key_name` | Empty string | Optional EC2 key pair |
+| `application_port` | `8080` | Application port used by SG and target group |
+| `health_check_path` | `/` | Target-group health-check path |
+| `asg_min_size` | `2` | ASG lower capacity bound |
+| `asg_max_size` | `6` | ASG upper capacity bound |
+| `asg_desired_capacity` | `2` | Initial desired instance count |
+| `asg_health_check_grace_period` | `300` seconds | Grace time for new instances' ELB health |
+| `asg_cpu_target_value` | `60` percent | Target-tracking CPU target |
+| `asg_instance_warmup_seconds` | `300` seconds | Expected scaling warm-up time |
+
+## 8. Relationship to the ALB and security groups
+
+The supporting resources are in `alb.tf` and `security-groups.tf`:
+
+1. The public ALB accepts HTTP on port 80.
+2. Its listener forwards requests to the application target group.
+3. The target group uses HTTP on port 8080 and checks `/`.
+4. The application security group allows port 8080 from the ALB security group.
+5. The ASG registers its EC2 instances with that target group.
+6. Healthy instances receive traffic; unhealthy targets are excluded from normal traffic and ELB health can inform ASG replacement.
+
+Traffic path:
 
 ```text
-Average CPU utilization of all application ASG instances
+Internet client
+  -> public ALB, TCP 80
+  -> ALB listener
+  -> application target group, HTTP 8080
+  -> application security group
+  -> healthy EC2 instance in a private subnet
 ```
 
-AWS CloudWatch calculates the metric. Target tracking creates the needed alarms and adjusts desired capacity toward 60% average CPU utilization.
+## 9. What happens when Terraform applies the configuration
 
-## 9. Default ASG settings
+At a high level, Terraform:
 
-The applicable variable defaults are:
+1. Reads the latest Amazon Linux 2023 AMI parameter unless a custom AMI ID is supplied.
+2. Creates or updates the launch template.
+3. Creates or updates the ASG in the private subnet IDs.
+4. Requests the initial desired instance count, bounded by the minimum and maximum.
+5. AWS launches instances using the launch template and attaches the application security group.
+6. The ASG registers the instances with the ALB target group.
+7. The ALB checks the configured health path and port.
+8. The ASG uses ELB health status after the grace period when evaluating instance health.
+9. The target-tracking policy monitors average ASG CPU and adjusts desired capacity toward the target, subject to the capacity bounds.
 
-```text
-application_ami_id              = ""
-instance_type                   = "t3.micro"
-key_name                        = ""
-application_port                = 8080
-health_check_path               = "/"
-asg_min_size                    = 2
-asg_max_size                    = 6
-asg_desired_capacity            = 2
-asg_health_check_grace_period   = 300
-asg_cpu_target_value            = 60
-asg_instance_warmup_seconds     = 300
-```
+Terraform describes and manages infrastructure; it does not itself run inside the EC2 instances or deploy the application with this file.
 
-The ASG therefore begins with two application instances and can scale to six.
+## 10. Critical operational limitations
 
-## 10. Security relationship
+### The default AMI does not include the application
 
-The application instance security group allows incoming application traffic only from the ALB security group:
+The fallback SSM parameter supplies a base Amazon Linux 2023 image. The launch template has no user data, so it does not install Java or Tomcat, fetch a WAR/JAR, configure database connectivity, or start the application. Unless a custom application AMI is supplied, the instance is unlikely to pass the application health check.
 
-```hcl
-from_port       = var.application_port
-to_port         = var.application_port
-protocol        = "tcp"
-security_groups = [aws_security_group.alb.id]
-```
+### Private subnets have no configured NAT route
 
-The public ALB security group accepts HTTP traffic from `0.0.0.0/0` on port `80`.
+The current VPC file creates private route tables but does not define NAT gateways or default routes through NAT. Instances therefore do not have configured internet egress to download packages from public repositories. A prebuilt AMI, VPC endpoints for suitable AWS services, or a separately configured egress path is needed for deployment dependencies.
 
-The resulting request flow is:
+### The current design is one application tier
 
-```text
-Internet user
-  -> ALB security group: TCP 80
-  -> Public ALB
-  -> HTTP listener: port 80
-  -> Target group: HTTP port 8080
-  -> Application security group
-  -> Healthy private EC2 instance
-```
+This ASG file creates a Tomcat/application ASG behind the existing public ALB. It does not create the README's separate Nginx frontend ASG, public NLB, or internal NLB.
 
-## 11. ALB health-check relationship
+### No explicit instance refresh
 
-The target group performs HTTP health checks with:
+Selecting `latest_version` makes future launches use the latest launch-template version. It does not automatically roll existing instances. Plan a controlled instance refresh when the AMI or launch-template settings change.
 
-```text
-Protocol             = HTTP
-Port                 = traffic-port
-Port value           = 8080
-Path                 = /
-Matcher              = 200-399
-Interval             = 30 seconds
-Timeout              = 5 seconds
-Healthy threshold    = 2
-Unhealthy threshold  = 3
-```
+### CPU target does not guarantee application performance
 
-A target is healthy after two successful checks. It becomes unhealthy after three failed checks.
+CPU target tracking scales based on average CPU. It does not directly monitor response latency, request count, memory, or database saturation. Load test the application and choose metrics and capacity bounds appropriate to the workload.
 
-Because the ASG uses `health_check_type = "ELB"`, the ALB target health is relevant to ASG instance health and replacement behavior.
+## 11. Validation checklist
 
-## 12. Complete startup and scaling flow
+Before deployment, verify:
 
-```text
-Terraform
-  -> Creates launch template
-  -> Creates ASG
-  -> ASG launches instances in private subnets
-  -> Launch template attaches application security group
-  -> ASG registers instances with ALB target group
-  -> ALB checks application health
-  -> ALB sends traffic to healthy instances
-  -> CPU target tracking observes ASGAverageCPUUtilization
-  -> Policy increases or decreases desired capacity
-  -> Capacity remains between minimum and maximum
-```
+- A custom `application_ami_id` contains the Java runtime, deployed application, and required startup configuration, or another deployment process exists.
+- The application responds on port `8080` and the configured health path returns an accepted HTTP status (`200–399`).
+- Private-subnet network connectivity supports the chosen image and deployment method.
+- `application_port` matches the application and target-group port.
+- `min_size <= desired_capacity <= max_size`.
+- The AMI exists in the configured region and has the architecture expected by the instance type.
+- The key pair exists in the configured region if `key_name` is supplied.
+- Database credentials and other secrets are delivered securely, not embedded in source or user data.
+- The plan is reviewed for instance replacement, capacity changes, and cost before applying.
 
-## 13. Deployment requirement
-
-The current launch template has no `user_data` block.
-
-Therefore, it does not:
-
-- Install Java.
-- Install Tomcat.
-- Deploy a WAR or JAR.
-- Configure database or cache connections.
-- Create an application health endpoint.
-
-New instances using the fallback AMI do not automatically become healthy application targets.
-
-Before production use, provide either:
-
-- A custom application AMI containing Java, Tomcat, and the deployed application.
-- Or secure deployment automation such as user data that retrieves a tested application artifact and starts it.
-
-## 14. Private-network requirement
-
-The current VPC file does not configure NAT gateways or private egress routes.
-
-The private application instances therefore have no confirmed route for package repositories or public artifact repositories.
-
-An application-ready AMI or private artifact service is needed. For internet software updates and artifact downloads, add or use a NAT gateway or another egress mechanism.
-
-## 15. Scaling behavior
-
-With a 60% CPU target and default capacities:
-
-```text
-Minimum instances: 2
-Initial instances: 2
-Maximum instances: 6
-CPU target: 60%
-Scale-in: enabled
-Warm-up: 300 seconds
-```
-
-Example behavior:
-
-- If average CPU rises above the target, target tracking increases capacity toward enough instances to reduce average CPU toward 60%.
-- If average CPU falls below the target, target tracking can reduce capacity toward the target, subject to scale-in checks.
-- It never scales below two instances.
-- It never scales above six instances.
-- New instances receive time to warm up before their metrics are fully considered.
-
-## 16. Limitations and validation items
-
-Before applying this configuration:
-
-- Set `application_ami_id` to an AMI that contains the application and runtime, or add deployment user data.
-- Ensure `/` returns an accepted HTTP `200–399` response on port `8080`.
-- Verify private subnets have the required outbound connectivity.
-- Configure database credentials and application configuration securely.
-- Confirm `min_size <= desired_capacity <= max_size`.
-- Confirm `application_port` matches the application listener.
-- Confirm `key_name` exists in the deployment region or leave it empty.
-- Confirm the AMI architecture matches `t3.micro` and the AWS region.
-- Verify the launch-template image, instance type, and security group with `terraform plan`.
-
-Run validation from `DevOps-Project-01/infrastructure-v2`:
+Run from `DevOps-Project-01/infrastructure-v2`:
 
 ```bash
 terraform fmt -check -recursive
