@@ -17,3 +17,28 @@ output "private_subnet_ids" {
   description = "IDs of the private subnets"
   value       = aws_subnet.private[*].id
 }
+
+output "alb_dns_name" {
+  description = "DNS name of the public application load balancer"
+  value       = aws_lb.application.dns_name
+}
+
+output "alb_arn" {
+  description = "ARN of the public application load balancer"
+  value       = aws_lb.application.arn
+}
+
+output "application_target_group_arn" {
+  description = "ARN of the application target group"
+  value       = aws_lb_target_group.application.arn
+}
+
+output "application_asg_name" {
+  description = "Name of the application Auto Scaling Group"
+  value       = aws_autoscaling_group.application.name
+}
+
+output "application_security_group_id" {
+  description = "ID of the application instance security group"
+  value       = aws_security_group.application.id
+}
