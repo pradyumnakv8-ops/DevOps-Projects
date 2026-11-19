@@ -218,21 +218,69 @@ These settings do not create public DNS records, open port 53 to the internet, o
 
 `aws_internet_gateway.main` attaches an Internet Gateway to the VPC. The gateway alone does not make subnets public; a route table must direct traffic to it.
 
-### Public subnets
+### Public and private subnet resources
 
-`aws_subnet.public` creates one subnet per entry in `public_subnet_cidrs`. For each subnet:
+The subnet configuration is in `DevOps-Project-01/infrastructure-v2/vpc.tf`.
 
-- `vpc_id` places it in the new VPC.
-- `cidr_block` selects its IP range.
-- `availability_zone` selects its explicit AZ using the same index.
-- `map_public_ip_on_launch = true` assigns public IPv4 addresses by default to EC2 instances launched in that subnet.
-- Tags label it as public.
+```hcl
+resource "aws_subnet" "public" {
+  count = length(var.public_subnet_cidrs)
 
-A public IP alone does not provide internet reachability. The public route table, Internet Gateway, and security rules are also relevant.
+  vpc_id                  = aws_vpc.main.id
+  cidr_block              = var.public_subnet_cidrs[count.index]
+  availability_zone       = var.availability_zones[count.index]
+  map_public_ip_on_launch = true
+}
+```
 
-### Private subnets
+- `count` creates two public subnet resources because two public CIDRs are defined.
+- `count.index` starts at `0`, then `1`, and selects the corresponding CIDR and Availability Zone.
+- `vpc_id = aws_vpc.main.id` places each subnet inside the VPC.
+- `cidr_block` sets the IP address range for each subnet.
+- `availability_zone` places each subnet in the matching explicit AZ.
+- `map_public_ip_on_launch = true` gives EC2 instances launched in the subnet a public IPv4 address by default.
+- A public subnet is associated with a route table containing `0.0.0.0/0` pointing to the Internet Gateway.
 
-`aws_subnet.private` creates one subnet per entry in `private_subnet_cidrs`, in the matching AZ. It does not enable automatic public IP assignment. These subnets are intended for application instances and RDS.
+```text
+Index 0: 10.20.1.0/24  in ap-south-1a
+Index 1: 10.20.2.0/24  in ap-south-1b
+```
+
+```hcl
+resource "aws_subnet" "private" {
+  count = length(var.private_subnet_cidrs)
+
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = var.private_subnet_cidrs[count.index]
+  availability_zone = var.availability_zones[count.index]
+}
+```
+
+- `count` creates two private subnet resources because two private CIDRs are defined.
+- `count.index` uses the matching private CIDR and Availability Zone.
+- `vpc_id = aws_vpc.main.id` places each subnet inside the VPC.
+- `cidr_block` sets the private subnet IP address range.
+- `availability_zone` places each subnet in the matching explicit AZ.
+- It does not set `map_public_ip_on_launch`, so private subnets do not assign public IP addresses to instances by default.
+- Private subnets use separate private route tables in the initial design.
+- Their route tables include the VPC local route but no general `0.0.0.0/0` route.
+
+```text
+Index 0: 10.20.11.0/24 in ap-south-1a
+Index 1: 10.20.12.0/24 in ap-south-1b
+```
+
+The final subnet layout is:
+
+```text
+VPC: 10.20.0.0/16
+├── ap-south-1a
+│   ├── Public subnet: 10.20.1.0/24
+│   └── Private subnet: 10.20.11.0/24
+└── ap-south-1b
+    ├── Public subnet: 10.20.2.0/24
+    └── Private subnet: 10.20.12.0/24
+```
 
 ### `count` and `count.index`
 
