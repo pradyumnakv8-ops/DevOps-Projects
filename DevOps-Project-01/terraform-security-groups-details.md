@@ -1,195 +1,421 @@
-# Terraform Security Groups: Line-by-Line Discussion
+# Terraform Security Groups: Configuration and Complete Explanation
 
-This document contains the security-group discussion for `DevOps-Project-01`.
+This document explains the security-group configuration used by `DevOps-Project-01`. The configuration is located in:
 
-## 1. What is a security group?
+```text
+DevOps-Project-01/infrastructure/modules/security/
+├── main.tf
+├── variables.tf
+└── outputs.tf
+```
 
-A security group is a virtual firewall attached to AWS resources such as EC2 instances, load balancers, and RDS databases.
+Security groups act as virtual firewalls for AWS resources. They control allowed inbound and outbound traffic. They are stateful, so response traffic for an allowed connection is automatically permitted.
 
-It controls which inbound and outbound traffic is allowed for the attached resource.
+## 1. Complete security module configuration
 
-Important points:
+### `main.tf`
 
-- Security groups control allowed inbound and outbound traffic.
-- Security-group rules are allow-only; traffic that is not allowed is blocked automatically.
-- Security groups are stateful. If inbound traffic is allowed, the response traffic is allowed automatically.
-- Outbound traffic should be controlled explicitly in a hardened configuration.
-- Security groups can reference another security group or a CIDR range.
-- Route tables determine the network path; security groups determine whether traffic is permitted.
+```hcl
+# Security Groups Module
 
-## 2. ALB security group
+# ALB Security Group
+resource "aws_security_group" "alb" {
+  name        = "${var.environment}-alb-sg"
+  description = "Security group for application load balancer"
+  vpc_id      = var.vpc_id
 
-The ALB security group allows public HTTP and HTTPS traffic:
+  ingress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name        = "${var.environment}-alb-sg"
+    Environment = var.environment
+  }
+}
+
+# Application Security Group
+resource "aws_security_group" "app" {
+  name        = "${var.environment}-app-sg"
+  description = "Security group for application servers"
+  vpc_id      = var.vpc_id
+
+  ingress {
+    from_port       = 8080
+    to_port         = 8080
+    protocol        = "tcp"
+    security_groups = [aws_security_group.alb.id]
+  }
+
+  ingress {
+    from_port       = 22
+    to_port         = 22
+    protocol        = "tcp"
+    security_groups = [aws_security_group.bastion.id]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name        = "${var.environment}-app-sg"
+    Environment = var.environment
+  }
+}
+
+# Database Security Group
+resource "aws_security_group" "db" {
+  name        = "${var.environment}-db-sg"
+  description = "Security group for database"
+  vpc_id      = var.vpc_id
+
+  ingress {
+    from_port       = 3306
+    to_port         = 3306
+    protocol        = "tcp"
+    security_groups = [aws_security_group.app.id]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name        = "${var.environment}-db-sg"
+    Environment = var.environment
+  }
+}
+
+# Bastion Host Security Group
+resource "aws_security_group" "bastion" {
+  name        = "${var.environment}-bastion-sg"
+  description = "Security group for bastion host"
+  vpc_id      = var.vpc_id
+
+  ingress {
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = var.allowed_ssh_cidr_blocks
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name        = "${var.environment}-bastion-sg"
+    Environment = var.environment
+  }
+}
+```
+
+### `variables.tf`
+
+```hcl
+variable "environment" {
+  description = "Environment name"
+  type        = string
+}
+
+variable "vpc_id" {
+  description = "ID of the VPC"
+  type        = string
+}
+
+variable "allowed_ssh_cidr_blocks" {
+  description = "List of CIDR blocks allowed to SSH to bastion host"
+  type        = list(string)
+  default     = ["0.0.0.0/0"]  # WARNING: Restrict this in production
+}
+```
+
+### `outputs.tf`
+
+```hcl
+output "alb_security_group_id" {
+  description = "ID of the ALB security group"
+  value       = aws_security_group.alb.id
+}
+
+output "app_security_group_id" {
+  description = "ID of the application security group"
+  value       = aws_security_group.app.id
+}
+
+output "db_security_group_id" {
+  description = "ID of the database security group"
+  value       = aws_security_group.db.id
+}
+
+output "bastion_security_group_id" {
+  description = "ID of the bastion host security group"
+  value       = aws_security_group.bastion.id
+}
+```
+
+## 2. Common configuration fields
+
+Each resource uses the following fields:
+
+- `resource "aws_security_group"` creates one AWS security group.
+- `name` gives the group an environment-specific name.
+- `description` documents the group's purpose.
+- `vpc_id` attaches the security group to the project VPC.
+- `ingress` defines allowed inbound traffic.
+- `egress` defines allowed outbound traffic.
+- `tags` adds searchable metadata.
+
+The expression `${var.environment}` creates names such as:
+
+```text
+ dev-alb-sg
+ dev-app-sg
+ dev-db-sg
+ dev-bastion-sg
+```
+
+## 3. ALB security group
+
+```hcl
+resource "aws_security_group" "alb" {
+  name        = "${var.environment}-alb-sg"
+  description = "Security group for application load balancer"
+  vpc_id      = var.vpc_id
+```
+
+This creates the security group attached to the Application Load Balancer.
+
+### Inbound HTTP
+
+```hcl
+ingress {
+  from_port   = 80
+  to_port     = 80
+  protocol    = "tcp"
+  cidr_blocks = ["0.0.0.0/0"]
+}
+```
+
+This allows TCP traffic on port `80` from any IPv4 address. It is used by the HTTP listener.
+
+### Inbound HTTPS
+
+```hcl
+ingress {
+  from_port   = 443
+  to_port     = 443
+  protocol    = "tcp"
+  cidr_blocks = ["0.0.0.0/0"]
+}
+```
+
+This allows TCP traffic on port `443` from any IPv4 address. An HTTPS listener and ACM certificate are still required before HTTPS traffic can actually be processed.
+
+### ALB outbound traffic
+
+```hcl
+egress {
+  from_port   = 0
+  to_port     = 0
+  protocol    = "-1"
+  cidr_blocks = ["0.0.0.0/0"]
+}
+```
+
+`protocol = "-1"` represents all protocols. This allows the ALB to send traffic to application targets.
+
+The ALB security flow is:
 
 ```text
 Internet -> ALB security group: TCP 80/443
+ALB security group -> Application security group: TCP 8080
 ```
 
-The rules are:
-
-```text
-Inbound TCP 80  from 0.0.0.0/0
-Inbound TCP 443 from 0.0.0.0/0
-```
-
-Port `80` is used for HTTP traffic. Port `443` is used for HTTPS traffic when an HTTPS listener and certificate are configured.
-
-The ALB security group also allows outbound traffic so the ALB can connect to application targets.
-
-## 3. Application security group
-
-The application security group allows traffic from the ALB and bastion host:
-
-```text
-ALB security group     -> Application security group: TCP 8080
-Bastion security group -> Application security group: TCP 22
-```
-
-### Application traffic
-
-The application listens on port `8080`. Only resources associated with the ALB security group should be allowed to reach this port:
+## 4. Application security group
 
 ```hcl
-from_port       = 8080
-to_port         = 8080
-protocol        = "tcp"
-security_groups = [aws_security_group.alb.id]
+resource "aws_security_group" "app" {
+  name        = "${var.environment}-app-sg"
+  description = "Security group for application servers"
+  vpc_id      = var.vpc_id
 ```
 
-This means the application port is not exposed directly to the whole internet. Requests should arrive through the ALB.
+This group is attached to application EC2 instances created by the Auto Scaling Group.
 
-### SSH administration
+### Application traffic from the ALB
 
-The application security group allows SSH on port `22` from the bastion security group:
+```hcl
+ingress {
+  from_port       = 8080
+  to_port         = 8080
+  protocol        = "tcp"
+  security_groups = [aws_security_group.alb.id]
+}
+```
+
+This allows application traffic on port `8080` only from resources associated with the ALB security group. It does not expose port `8080` to the whole internet.
+
+The application traffic flow is:
 
 ```text
-Bastion security group -> Application security group: TCP 22
+Client -> ALB port 80 -> ALB -> Application instance port 8080
 ```
 
-This keeps direct SSH access to the application instances restricted to the bastion host.
+### SSH traffic from the bastion
 
-The application security group also allows outbound traffic as configured in the module.
+```hcl
+ingress {
+  from_port       = 22
+  to_port         = 22
+  protocol        = "tcp"
+  security_groups = [aws_security_group.bastion.id]
+}
+```
 
-## 4. Database security group
+This allows SSH on port `22` only from the bastion security group. Direct SSH access from the internet to application instances is not allowed by this rule.
 
-The database security group permits MySQL traffic only from the application security group:
+### Application outbound traffic
+
+The application group permits all outbound traffic according to the current configuration. This allows application instances to reach services such as the database, package repositories, AWS APIs, and other required endpoints.
+
+## 5. Database security group
+
+```hcl
+resource "aws_security_group" "db" {
+  name        = "${var.environment}-db-sg"
+  description = "Security group for database"
+  vpc_id      = var.vpc_id
+```
+
+This group is attached to the RDS database.
+
+### MySQL traffic from the application
+
+```hcl
+ingress {
+  from_port       = 3306
+  to_port         = 3306
+  protocol        = "tcp"
+  security_groups = [aws_security_group.app.id]
+}
+```
+
+This allows MySQL traffic on port `3306` only from the application security group.
+
+The database is therefore not open to the internet:
 
 ```text
 Application security group -> Database security group: TCP 3306
 ```
 
-Port `3306` is the MySQL port. The database should not allow MySQL traffic directly from the internet.
+The database outbound rule is currently open for all outbound traffic according to the configuration.
 
-The rule uses the application security group as the source, which means only resources associated with that security group can initiate database connections:
+## 6. Bastion host security group
 
 ```hcl
-from_port       = 3306
-to_port         = 3306
-protocol        = "tcp"
-security_groups = [aws_security_group.app.id]
+resource "aws_security_group" "bastion" {
+  name        = "${var.environment}-bastion-sg"
+  description = "Security group for bastion host"
+  vpc_id      = var.vpc_id
 ```
 
-The database security group also allows outbound traffic as configured in the module.
+This group is attached to the bastion host.
 
-## 5. Bastion security group
+### SSH access from administrators
 
-The bastion security group allows inbound SSH traffic on port `22` from the CIDR blocks specified by `var.allowed_ssh_cidr_blocks`:
-
-```text
-Administrator IP or trusted network -> Bastion: TCP 22
+```hcl
+ingress {
+  from_port   = 22
+  to_port     = 22
+  protocol    = "tcp"
+  cidr_blocks = var.allowed_ssh_cidr_blocks
+}
 ```
 
-The bastion then provides the controlled administration path to private application instances.
+SSH access is controlled by the variable `allowed_ssh_cidr_blocks`.
 
-The current default value of `allowed_ssh_cidr_blocks` is:
+The current default is:
 
-```text
-0.0.0.0/0
+```hcl
+default = ["0.0.0.0/0"]
 ```
 
-This allows SSH attempts from any IPv4 address and should not be used as the final production setting.
-
-Restrict it to a trusted administrator IP, VPN CIDR, or another controlled network. For one fixed public IPv4 address, use a `/32` CIDR:
+This allows SSH attempts from any IPv4 address and is unsafe for production. It should be restricted to a trusted administrator IP, VPN range, or corporate network. For one fixed public IPv4 address, use a `/32` CIDR such as:
 
 ```text
 203.0.113.10/32
 ```
 
-The bastion security group allows outbound traffic as configured in the module.
-
-## 6. Expected traffic relationships
-
-```text
-Internet -> ALB security group: TCP 80/443
-ALB security group -> App security group: TCP 8080
-Bastion security group -> App security group: TCP 22
-App security group -> Database security group: TCP 3306
-```
-
-This creates the intended layered access model:
-
-```text
-Internet
-  -> ALB
-  -> Application instances
-  -> Database
-```
-
-Administrative access follows a separate path:
-
-```text
-Administrator
-  -> Bastion host
-  -> Application instances over SSH
-```
+The bastion outbound rule permits the bastion to connect to the private application instances.
 
 ## 7. Security-group references
 
-A security-group reference as an ingress source restricts traffic to resources associated with the referenced security group. It does not mean that the entire VPC CIDR is allowed.
-
-For example:
+These rules use security-group references instead of broad CIDR ranges:
 
 ```hcl
 security_groups = [aws_security_group.alb.id]
+security_groups = [aws_security_group.bastion.id]
+security_groups = [aws_security_group.app.id]
 ```
 
-allows traffic from resources using the ALB security group. It is more restrictive than allowing the entire VPC CIDR with `cidr_blocks`.
-
-Security-group references are useful for expressing application relationships:
+They mean:
 
 ```text
-ALB group -> application group -> database group
+ALB security group -> Application security group
+Bastion security group -> Application security group
+Application security group -> Database security group
 ```
 
-## 8. Security groups and route tables
+A security-group reference allows traffic from resources associated with that security group. It does not allow every resource in the VPC.
 
-Security groups and route tables perform different jobs:
+## 8. Security groups versus route tables
 
 | Resource | Responsibility |
 | --- | --- |
 | Route table | Determines where traffic is sent |
 | Security group | Determines whether traffic is permitted |
 
-A route must exist before traffic can reach its destination. A security-group rule must also allow the traffic.
+Both must be correct. A security group cannot create a missing route, and a route cannot override a blocked security-group rule.
 
-For example, the ALB request flow requires both:
+For the ALB flow, the required conditions are:
 
 ```text
-Public subnet route table
-  -> Internet Gateway
-
-ALB security group
-  -> Allows TCP 80/443
-
-Application security group
-  -> Allows TCP 8080 from the ALB security group
+Public subnet route table -> Internet Gateway
+ALB security group        -> Allows TCP 80/443
+App security group        -> Allows TCP 8080 from the ALB group
 ```
-
-A security group cannot create a missing network route, and a route table cannot override a blocked security-group rule.
 
 ## 9. Stateful behavior
 
-Security groups are stateful. When an allowed connection is established, response traffic is automatically permitted, even if a separate inbound rule for the response is not defined.
+Security groups are stateful. If a connection is allowed in one direction, the response traffic is automatically allowed.
 
 For example:
 
@@ -198,9 +424,48 @@ ALB -> Application: TCP 8080
 Application -> ALB: response traffic automatically allowed
 ```
 
-The same behavior applies to an allowed application-to-database connection and its response.
+The same applies to:
 
-## 10. Complete security flow
+```text
+Application -> Database: TCP 3306
+Database -> Application: response traffic automatically allowed
+```
+
+## 10. Root module usage
+
+The root configuration creates the security module as follows:
+
+```hcl
+module "security" {
+  source = "./modules/security"
+
+  environment              = var.environment
+  vpc_id                   = module.vpc.vpc_id
+  allowed_ssh_cidr_blocks  = var.allowed_ssh_cidr_blocks
+}
+```
+
+The outputs are then used by other modules:
+
+```hcl
+module "rds" {
+  source = "./modules/rds"
+
+  security_group_ids = [module.security.db_security_group_id]
+}
+
+module "asg" {
+  source = "./modules/asg"
+
+  security_group_ids = [module.security.app_security_group_id]
+}
+```
+
+The output IDs allow the RDS and ASG modules to reuse the existing security groups without defining duplicate groups.
+
+## 11. Complete traffic flow
+
+Application traffic:
 
 ```text
 Internet
@@ -211,54 +476,34 @@ Internet
   -> RDS MySQL database
 ```
 
-Administrative flow:
+Administrative traffic:
 
 ```text
 Trusted administrator CIDR
   -> Bastion security group: TCP 22
+  -> Bastion host
   -> Application security group: TCP 22
   -> Application instance
 ```
 
-## 11. Module and output usage
+## 12. Security warning and recommended production changes
 
-The security groups are created by the security module. The root configuration passes the resulting security-group IDs to other modules.
-
-The application security group is passed to the Auto Scaling Group:
+The default bastion SSH rule allows `0.0.0.0/0`:
 
 ```hcl
-module "asg" {
-  source = "./modules/asg"
-
-  security_group_ids = [module.security.app_security_group_id]
-}
+default = ["0.0.0.0/0"]
 ```
 
-The database security group is passed to the RDS module:
-
-```hcl
-module "rds" {
-  source = "./modules/rds"
-
-  security_group_ids = [module.security.db_security_group_id]
-}
-```
-
-The security module exports security-group IDs so other modules can use the groups without duplicating resource definitions.
-
-## 12. Important security warning
-
-The bastion SSH rule currently defaults to `0.0.0.0/0`. This is broad and exposes port `22` to the entire internet.
-
-Before using the configuration in a real environment:
+Before using this configuration in production:
 
 - Restrict `allowed_ssh_cidr_blocks` to trusted administrator IPs or VPN ranges.
 - Avoid exposing application SSH directly to the internet.
 - Allow application SSH only from the bastion security group.
 - Allow database access only from the application security group.
-- Keep public access limited to the ALB listener ports.
+- Keep public access limited to ALB listener ports.
+- Consider restricting outbound rules according to the application's actual requirements.
 
-The intended final access model is:
+The intended access model is:
 
 ```text
 Public users       -> ALB on TCP 80/443
@@ -266,3 +511,25 @@ ALB                -> Application on TCP 8080
 Bastion            -> Application on TCP 22
 Application        -> Database on TCP 3306
 ```
+
+## 13. Validation
+
+Run Terraform from `DevOps-Project-01/infrastructure`:
+
+```bash
+terraform fmt -recursive
+terraform validate
+terraform plan
+```
+
+Verify the plan shows:
+
+- One ALB security group.
+- One application security group.
+- One database security group.
+- One bastion security group.
+- ALB access on ports `80` and `443`.
+- Application access on port `8080` only from the ALB security group.
+- Application SSH on port `22` only from the bastion security group.
+- Database access on port `3306` only from the application security group.
+- Bastion SSH restricted to the intended CIDR blocks.
