@@ -368,6 +368,8 @@ The private subnets currently have no general outbound internet path. If private
 
 A NAT Gateway does not make private instances directly reachable from the internet.
 
+A VPC endpoint can provide private access to supported AWS services without requiring general internet routing. AWS Systems Manager Session Manager may also help reduce the need for direct SSH access.
+
 ## 8. Traffic and security summary
 
 ```text
@@ -384,9 +386,59 @@ Internet
 - Security groups decide whether traffic is allowed to reach a resource.
 - Public/private names and tags do not establish network access by themselves; routes, public addressing, and security rules determine actual connectivity.
 
-## 9. Outputs
+## 9. Security groups in the existing modular infrastructure
 
-`outputs.tf` exposes useful values after apply:
+The project's modular security-group implementation is in `DevOps-Project-01/infrastructure/modules/security/main.tf`. This is separate from `infrastructure-v2`; the security-group resources described here belong to the existing `infrastructure/` module setup.
+
+A security group is a virtual firewall attached to AWS resources such as EC2 instances, load balancers, and RDS databases.
+
+Important points:
+
+- It controls allowed inbound and outbound traffic.
+- Rules are allow-only; denied traffic is blocked automatically.
+- Security groups are stateful: if inbound traffic is allowed, its response is allowed automatically.
+- Outbound traffic should be controlled explicitly in a hardened configuration.
+- Security groups reference resources or CIDR ranges.
+- Route tables determine routing; security groups determine whether traffic is permitted.
+
+### ALB security group
+
+The security module defines `aws_security_group.alb` with inbound TCP ports `80` and `443` allowed from `0.0.0.0/0`, and all outbound traffic allowed. This permits public HTTP/HTTPS requests to reach the ALB.
+
+The ALB module also defines its own ALB security group in `DevOps-Project-01/infrastructure/modules/alb/main.tf`. The ALB resource uses that module-local group. The security module's `alb_security_group_id` output is not passed into the ALB module in the root `main.tf`, so these are separate definitions; avoid assuming the security-module ALB group is the one attached to the ALB.
+
+### Application security group
+
+`aws_security_group.app` allows:
+
+- TCP `8080` from the ALB security group, for application traffic.
+- TCP `22` from the bastion security group, for SSH administration.
+- All outbound traffic, as configured in the module.
+
+The root configuration passes `module.security.app_security_group_id` to the Auto Scaling Group, so instances launched by that group use this application security group.
+
+### Database security group
+
+`aws_security_group.db` permits inbound TCP `3306` only from the application security group. This is the MySQL port. The root configuration passes its ID to the RDS module, restricting database ingress to application instances associated with the app security group. The module also allows all outbound traffic.
+
+### Bastion security group
+
+`aws_security_group.bastion` allows inbound TCP `22` from `var.allowed_ssh_cidr_blocks`, and allows all outbound traffic. In `modules/security/variables.tf`, that variable defaults to `0.0.0.0/0`, which allows SSH attempts from any IPv4 address. Restrict it to a trusted administrator IP or VPN CIDR, such as a `/32` for a single fixed IPv4 address, before using this configuration in a real environment.
+
+### Expected traffic relationships
+
+```text
+Internet -> ALB security group: TCP 80/443
+ALB security group -> app security group: TCP 8080
+Bastion security group -> app security group: TCP 22
+App security group -> database security group: TCP 3306
+```
+
+Security-group references as ingress sources restrict traffic to resources associated with the referenced group; they do not mean the whole VPC CIDR is allowed. Security groups are stateful, so response traffic for an allowed connection is automatically permitted. These rules control traffic permission; route tables still determine whether a network path exists.
+
+## 10. Outputs
+
+`infrastructure-v2/outputs.tf` exposes useful values after apply:
 
 ```hcl
 output "vpc_id" {
@@ -410,7 +462,9 @@ output "private_subnet_ids" {
 }
 ```
 
-## 10. Validate and deploy
+The security module in `infrastructure/modules/security/outputs.tf` also exports the ALB, app, database, and bastion security-group IDs for use by other modules.
+
+## 11. Validate and deploy
 
 From `DevOps-Project-01/infrastructure-v2`:
 
