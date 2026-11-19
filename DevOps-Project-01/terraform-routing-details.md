@@ -198,6 +198,22 @@ resource "aws_route_table_association" "private" {
 
 `aws_vpc.main` creates the VPC. It uses `var.vpc_cidr`, enables DNS support and hostnames, and adds a descriptive tag.
 
+#### DNS support and DNS hostnames
+
+```hcl
+enable_dns_support   = true
+enable_dns_hostnames = true
+```
+
+Both settings enable DNS behavior inside the VPC, but they serve different purposes:
+
+- `enable_dns_support = true` enables the Amazon-provided DNS resolver for the VPC. This supports resolving public DNS names, AWS private DNS names, and service endpoints. The resolver is commonly available at the VPC base address plus two; for `10.20.0.0/16`, that is `10.20.0.2`.
+- `enable_dns_hostnames = true` allows EC2 instances and compatible AWS resources to receive DNS hostnames, such as an AWS-generated private hostname.
+
+DNS hostnames depend on DNS support being enabled, so the two settings are normally enabled together. In this project they allow application instances to resolve service endpoints, including the private RDS endpoint, through AWS DNS.
+
+These settings do not create public DNS records, open port 53 to the internet, or replace security-group rules. If custom DNS filtering or network controls are used, make sure the required DNS traffic is permitted.
+
 ### Internet Gateway
 
 `aws_internet_gateway.main` attaches an Internet Gateway to the VPC. The gateway alone does not make subnets public; a route table must direct traffic to it.
