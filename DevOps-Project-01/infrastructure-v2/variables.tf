@@ -125,3 +125,69 @@ variable "asg_instance_warmup_seconds" {
   type        = number
   default     = 300
 }
+
+variable "db_name" {
+  description = "Initial MySQL database created by RDS"
+  type        = string
+  default     = "javaapp"
+}
+
+variable "db_master_username" {
+  description = "RDS master username; the password is generated and managed by RDS in Secrets Manager"
+  type        = string
+  default     = "dbadmin"
+}
+
+variable "db_instance_class" {
+  description = "RDS MySQL instance class"
+  type        = string
+  default     = "db.t3.medium"
+}
+
+variable "db_allocated_storage" {
+  description = "Initial RDS storage in GiB"
+  type        = number
+  default     = 20
+}
+
+variable "db_max_allocated_storage" {
+  description = "Maximum RDS autoscaled storage in GiB; must exceed db_allocated_storage"
+  type        = number
+  default     = 100
+}
+
+variable "db_multi_az" {
+  description = "Enable a synchronous standby in another Availability Zone"
+  type        = bool
+  default     = true
+}
+
+variable "db_backup_retention_days" {
+  description = "Number of days to retain automated backups and support point-in-time recovery"
+  type        = number
+  default     = 7
+}
+
+variable "db_backup_window" {
+  description = "Preferred UTC daily backup window"
+  type        = string
+  default     = "03:00-04:00"
+}
+
+variable "db_maintenance_window" {
+  description = "Preferred weekly UTC maintenance window"
+  type        = string
+  default     = "sun:04:00-sun:05:00"
+}
+
+variable "db_deletion_protection" {
+  description = "Protect the database from accidental deletion"
+  type        = bool
+  default     = true
+}
+
+variable "db_skip_final_snapshot" {
+  description = "Skip a final snapshot when deleting the database; keep false to retain a final backup"
+  type        = bool
+  default     = false
+}

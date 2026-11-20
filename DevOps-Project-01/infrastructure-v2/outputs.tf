@@ -42,3 +42,28 @@ output "application_security_group_id" {
   description = "ID of the application instance security group"
   value       = aws_security_group.application.id
 }
+
+output "database_endpoint" {
+  description = "DNS endpoint of the private MySQL database"
+  value       = aws_db_instance.mysql.address
+}
+
+output "database_port" {
+  description = "MySQL port"
+  value       = aws_db_instance.mysql.port
+}
+
+output "database_name" {
+  description = "Initial database name"
+  value       = aws_db_instance.mysql.db_name
+}
+
+output "database_master_secret_arn" {
+  description = "Secrets Manager ARN containing the RDS-managed master credentials"
+  value       = aws_db_instance.mysql.master_user_secret[0].secret_arn
+}
+
+output "database_security_group_id" {
+  description = "ID of the database security group"
+  value       = aws_security_group.database.id
+}
